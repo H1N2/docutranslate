@@ -2176,12 +2176,33 @@ async def main_page():
     index_path = Path(STATIC_DIR) / "index.html"
     if not index_path.exists():
         raise HTTPException(status_code=404, detail="index.html not found")
+    # 读取静态首页并注入“在线文本翻译”入口链接（不修改原文件）
+    try:
+        content = index_path.read_text(encoding="utf-8")
+    except Exception:
+        # 退化到文件响应
+        no_cache_headers = {
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+        return FileResponse(index_path, headers=no_cache_headers)
+
+    injection_anchor = '<h4 class="mb-0 me-3 fw-bold">DocuTranslate</h4>'
+    injection_button = (
+        injection_anchor +
+        '<a href="/text" class="btn btn-sm btn-outline-primary ms-2" title="在线文本翻译">在线文本翻译</a>'
+    )
+    if injection_anchor in content and "在线文本翻译" not in content:
+        content = content.replace(injection_anchor, injection_button, 1)
+
+    # 返回注入后的页面，避免缓存
     no_cache_headers = {
         "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
         "Pragma": "no-cache",
         "Expires": "0",
     }
-    return FileResponse(index_path, headers=no_cache_headers)
+    return HTMLResponse(content=content, headers=no_cache_headers)
 
 
 @app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
@@ -2195,6 +2216,25 @@ async def main_page_admin():
         "Expires": "0",
     }
     return FileResponse(index_path, headers=no_cache_headers)
+
+@app.get("/text", response_class=HTMLResponse, include_in_schema=False)
+async def text_translate_page():
+    """
+    =========================================
+    在线文本翻译独立页面入口
+    - 返回静态页面 text.html
+    - 顶部包含“返回首页”链接
+    =========================================
+    """
+    text_path = Path(STATIC_DIR) / "text.html"
+    if not text_path.exists():
+        raise HTTPException(status_code=404, detail="text.html not found")
+    no_cache_headers = {
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+    return FileResponse(text_path, headers=no_cache_headers)
 
 
 @app.get("/docs", include_in_schema=False)
@@ -2274,6 +2314,77 @@ async def temp_translate(
         global_logger.error(f"临时翻译接口出现错误：{e.__repr__()}", exc_info=True)
         return {"success": False, "reason": e.__repr__()}
 
+
+"""
+============================================
+ 在线文本翻译：一次性返回接口（中文注释）
+--------------------------------------------
+ - 路径: POST /service/translate_text
+ - 输入: 原始文本 + 目标语言 + 轻量LLM配置
+ - 输出: 翻译后的纯文本
+============================================
+"""
+
+from pydantic import BaseModel
+
+class OnlineTranslatorConfig(BaseModel):
+    base_url: Optional[str] = Field(default=None, description="OpenAI兼容地址")
+    api_key: Optional[str] = Field(default=None, description="API Key")
+    model_id: Optional[str] = Field(default=None, description="模型ID")
+    skip_translate: bool = Field(default=False, description="跳过AI翻译，仅原样输出")
+
+class OnlineTranslatePayload(BaseModel):
+    text: str = Field(..., description="待翻译原文")
+    to_lang: str = Field(default="简体中文", description="目标语言")
+    translator: Optional[OnlineTranslatorConfig] = Field(default=None, description="LLM配置")
+    insert_mode: Literal["replace", "append", "prepend"] = Field(default="replace", description="插入模式")
+    separator: str = Field(default="\n", description="分隔符（append/prepend时使用）")
+
+@service_router.post(
+    "/translate_text",
+    summary="在线文本翻译（非流式）",
+    description="一次性翻译输入文本并返回译文。",
+)
+async def service_translate_text(payload: OnlineTranslatePayload = Body(...)):
+    # =============================
+    # 参数校验与构造
+    # =============================
+    cfg = payload.translator or OnlineTranslatorConfig()
+    if not cfg.skip_translate:
+        if not (cfg.base_url and cfg.api_key and cfg.model_id):
+            raise HTTPException(status_code=400, detail="缺少LLM配置：请提供 base_url、api_key、model_id，或设置 skip_translate=true")
+
+    # 构造TXT翻译器配置（继承默认参数）
+    txt_cfg = TXTTranslatorConfig(
+        base_url=cfg.base_url,
+        api_key=cfg.api_key,
+        model_id=cfg.model_id,
+        to_lang=payload.to_lang,
+        insert_mode=payload.insert_mode,
+        separator=payload.separator,
+        skip_translate=cfg.skip_translate,
+        thinking=default_params.get("thinking"),
+        chunk_size=default_params.get("chunk_size"),
+        concurrent=default_params.get("concurrent"),
+        temperature=default_params.get("temperature"),
+        timeout=default_params.get("timeout"),
+        retry=default_params.get("retry"),
+        system_proxy_enable=default_params.get("system_proxy_enable"),
+        logger=global_logger,
+    )
+
+    # =============================
+    # 处理与返回
+    # =============================
+    try:
+        from docutranslate.translator.ai_translator.txt_translator import TXTTranslator
+        from docutranslate.ir.document import Document
+        doc = Document.from_bytes(content=payload.text.encode("utf-8"), suffix=".txt", stem="online_text")
+        TXTTranslator(txt_cfg).translate(doc)
+        translated = doc.content.decode("utf-8", errors="ignore")
+        return JSONResponse({"translated": translated})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"翻译失败: {e}")
 
 app.include_router(service_router)
 

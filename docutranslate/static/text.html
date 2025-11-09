@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-bs-theme="auto">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>在线文本翻译</title>
+  <link href="/static/bootstrap.css" rel="stylesheet" crossorigin="anonymous" />
+  <link rel="stylesheet" href="/static/bootstrap-icons.css" />
+  <link rel="icon" href="/static/favicon.ico" type="image/x-icon" />
+  <style>
+    /* =============================
+       在线文本翻译独立页样式（中文注释）
+       ============================= */
+    body { background-color: var(--bs-body-bg); }
+    /* =============================================
+       尺寸提升：增大容器宽度与编辑区高度（ASC2 注释）
+       - 容器宽度: 1200px
+       - 原文/译文区高度同步加大
+       ============================================= */
+    .container { max-width: 1200px; }
+    textarea { width: 100%; }
+    pre.result { background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color); border-radius: .375rem; padding: .75rem; white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+<body>
+<div class="container py-3">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h4 class="mb-0">在线文本翻译</h4>
+    <!-- 返回首页链接 -->
+    <a class="btn btn-sm btn-outline-secondary" href="/" title="返回首页">返回首页</a>
+  </div>
+
+  <!-- LLM 配置（可选，默认沿用首页配置；此处提供简版输入） -->
+  <div class="card mb-3">
+    <div class="card-header">LLM 配置（可选）</div>
+    <div class="card-body">
+      <!-- =============================
+           使用主页配置开关（中文注释）
+           当开启时尝试从 localStorage 已知键读取并禁用输入框
+           ============================= -->
+      <div class="form-check form-switch mb-2">
+        <input class="form-check-input" type="checkbox" id="use_home_cfg" checked>
+        <label class="form-check-label" for="use_home_cfg">使用主页配置</label>
+      </div>
+      <div class="row g-2">
+        <div class="col-md-4">
+          <input id="llm_base_url" class="form-control" placeholder="base_url 如 https://api.openai.com/v1" />
+        </div>
+        <div class="col-md-4">
+          <input id="llm_api_key" class="form-control" placeholder="api_key" type="password" autocomplete="off" />
+        </div>
+        <div class="col-md-4">
+          <input id="llm_model_id" class="form-control" placeholder="model_id 如 gpt-4o" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 文本输入与目标语言选择 -->
+  <div class="card">
+    <div class="card-header">输入与翻译</div>
+    <div class="card-body">
+      <!-- =============================
+           左右分栏布局：原文 | 译文
+           ============================= -->
+      <div class="row g-3 align-items-stretch">
+        <div class="col-md-6 d-flex flex-column">
+          <label class="form-label fw-bold">原文</label>
+          <textarea id="ot_input" rows="20" placeholder="粘贴待翻译文本..." class="flex-grow-1"></textarea>
+        </div>
+        <div class="col-md-6 d-flex flex-column">
+          <label class="form-label fw-bold">译文</label>
+          <pre id="ot_output" class="result flex-grow-1" style="min-height: 20rem;"></pre>
+        </div>
+      </div>
+      <div class="row g-2 mt-3">
+        <div class="col-md-4 d-flex align-items-center gap-2">
+          <!-- 语言下拉：持久化支持语言与选择（标签与下拉同一行） -->
+          <label for="ot_to_lang" class="mb-0 me-2 fw-bold">目标语言</label>
+          <select id="ot_to_lang" class="form-select" aria-label="选择目标语言"></select>
+        </div>
+        <div class="col-md-8 d-flex justify-content-end">
+          <button id="ot_btn" class="btn btn-primary">
+            <i class="bi bi-translate me-1"></i>翻译
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // =============================
+  // 在线文本翻译：非流式一次性返回
+  // =============================
+  // ------------------------------
+  // 初始化：语言列表与LLM配置持久化
+  // ------------------------------
+  const LANGS_KEY = 'ot_supported_langs';
+  const LANG_SEL_KEY = 'ot_selected_lang';
+  const DEFAULT_LANGS = [
+    '简体中文',
+    'English',
+    'Français',
+    'Português',
+    'Español',
+    'Русский',
+    'Українська'
+  ];
+
+  function initLangSelect() {
+    let langs;
+    try {
+      langs = JSON.parse(localStorage.getItem(LANGS_KEY) || '[]');
+    } catch { langs = []; }
+    if (!Array.isArray(langs) || langs.length === 0) {
+      langs = DEFAULT_LANGS;
+      localStorage.setItem(LANGS_KEY, JSON.stringify(langs));
+    }
+    const sel = document.getElementById('ot_to_lang');
+    sel.innerHTML = '';
+    for (const l of langs) {
+      const opt = document.createElement('option');
+      opt.value = l; opt.textContent = l; sel.appendChild(opt);
+    }
+    const saved = localStorage.getItem(LANG_SEL_KEY);
+    sel.value = saved && langs.includes(saved) ? saved : langs[0];
+    sel.addEventListener('change', () => {
+      localStorage.setItem(LANG_SEL_KEY, sel.value);
+    });
+  }
+
+  function initLLMInputs() {
+    const baseEl = document.getElementById('llm_base_url');
+    const keyEl = document.getElementById('llm_api_key');
+    const modelEl = document.getElementById('llm_model_id');
+    // =============================================
+    // 平台解析映射（尽量与首页选项一致，大小写不敏感）
+    // =============================================
+    const PLATFORM_BASE = {
+      'openai': 'https://api.openai.com/v1',
+      'zhipu': 'https://open.bigmodel.cn/api/paas/v4',
+      'moonshot': 'https://api.moonshot.cn/v1',
+      'deepseek': 'https://api.deepseek.com/v1',
+      'siliconflow': 'https://api.siliconflow.cn/v1',
+      'volcengine': 'https://api.maas.volcengineapi.com',
+      'google': 'https://generativelanguage.googleapis.com',
+      '302ai': 'https://api.302.ai/v1',
+      'custom': ''
+    };
+    function normalizePlatform(p) {
+      if (!p) return '';
+      const s = String(p).trim().toLowerCase();
+      // 若本身为URL，则直接返回（视作“custom”）
+      if (s.startsWith('http://') || s.startsWith('https://')) return s;
+      // 兼容中文/别名
+      if (s.includes('智谱') || s === 'glm' || s === 'bigmodel') return 'zhipu';
+      if (s.includes('硅基') || s.includes('silicon')) return 'siliconflow';
+      if (s.includes('火山') || s.includes('volc')) return 'volcengine';
+      return s;
+    }
+    function resolveBaseUrlByPlatform(p) {
+      const np = normalizePlatform(p);
+      if (!np) return '';
+      if (np.startsWith('http://') || np.startsWith('https://')) return np;
+      return PLATFORM_BASE[np] || '';
+    }
+    function getSelectedPlatform() {
+      // 优先读取可能的“当前平台”键
+      const candidates = ['translator_platform_selected', 'dt_selected_platform', 'ai_platform', 'llm_platform'];
+      for (const k of candidates) {
+        const v = localStorage.getItem(k);
+        if (v && v.trim()) return v.trim();
+      }
+      // 兜底：从存在 apikey 的 translator_platform_* 推断平台名
+      // 形如 translator_platform_zhipu_apikey / translator_platform_deepseek_model_id
+      let inferred = '';
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i) || '';
+        const lk = k.toLowerCase();
+        if (!lk.startsWith('translator_platform_')) continue;
+        if (lk.endsWith('_apikey') || lk.endsWith('_model_id')) {
+          const midx = 'translator_platform_'.length;
+          const suffix = lk.endsWith('_apikey') ? '_apikey' : '_model_id';
+          const plat = k.substring(midx, k.length - suffix.length);
+          if (plat && plat.trim()) {
+            inferred = plat.trim();
+            // 选择第一个匹配即可，避免旧键干扰时序不确定
+            break;
+          }
+        }
+      }
+      return inferred;
+    }
+    // ----------------------------------------------
+    // 助手: 从 localStorage 广泛读取LLM配置（含JSON对象）
+    // ----------------------------------------------
+    function readLLMFromLocalStorage() {
+      /* ============================================
+         广谱读取 LLM 配置（中文注释 / ASC2 风格）
+         - 支持 snake_case 与 camelCase
+         - 支持嵌套对象结构：llm/ai/config/openai
+         - 支持 model 字段为字符串或对象（id/name）
+         - 使用 localStorage.length 迭代，适配所有浏览器
+         ============================================ */
+      const result = { base_url: '', api_key: '', model_id: '' };
+      // 先按“当前平台”推断（避免误选旧平台）
+      const selectedPlat = getSelectedPlatform();
+      const np = normalizePlatform(selectedPlat);
+      if (np) {
+        // base_url：custom 平台读取自定义，否则按映射
+        const customBase = localStorage.getItem('translator_platform_custom_base_url') || '';
+        result.base_url = np === 'custom' ? (customBase.trim() || '') : resolveBaseUrlByPlatform(np);
+        // api_key / model_id：按平台名读取标准键
+        const apiKey = localStorage.getItem(`translator_platform_${selectedPlat}_apikey`) || localStorage.getItem(`translator_platform_${np}_apikey`) || '';
+        const modelId = localStorage.getItem(`translator_platform_${selectedPlat}_model_id`) || localStorage.getItem(`translator_platform_${np}_model_id`) || '';
+        if (apiKey && apiKey.trim()) result.api_key = apiKey.trim();
+        if (modelId && modelId.trim()) result.model_id = modelId.trim();
+      }
+      const tryAssign = (obj) => {
+        if (!obj || typeof obj !== 'object') return;
+        const a = obj;
+        // base_url / baseUrl
+        if (!result.base_url && typeof a.base_url === 'string') result.base_url = a.base_url.trim();
+        if (!result.base_url && typeof a.baseUrl === 'string') result.base_url = a.baseUrl.trim();
+        // api_key / apiKey / token
+        if (!result.api_key && typeof a.api_key === 'string') result.api_key = a.api_key.trim();
+        if (!result.api_key && typeof a.apiKey === 'string') result.api_key = a.apiKey.trim();
+        if (!result.api_key && typeof a.token === 'string') result.api_key = a.token.trim();
+        // model_id / modelId / model
+        if (!result.model_id && typeof a.model_id === 'string') result.model_id = a.model_id.trim();
+        if (!result.model_id && typeof a.modelId === 'string') result.model_id = a.modelId.trim();
+        if (!result.model_id && typeof a.model === 'string') result.model_id = a.model.trim();
+        if (!result.model_id && a.model && typeof a.model === 'object') {
+          const mid = (typeof a.model.id === 'string' && a.model.id.trim()) ||
+                      (typeof a.model.name === 'string' && a.model.name.trim());
+          if (mid) result.model_id = mid;
+        }
+        // 递归常见命名空间
+        if (a.llm) tryAssign(a.llm);
+        if (a.ai) tryAssign(a.ai);
+        if (a.config) tryAssign(a.config);
+        if (a.openai) tryAssign(a.openai);
+      };
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        const v = localStorage.getItem(k);
+        if (!v) continue;
+        // 尝试JSON解析
+        try {
+          const parsed = JSON.parse(v);
+          tryAssign(parsed);
+        } catch {
+          // 非JSON，可能是单值
+          const val = v.trim();
+          if (!val) continue;
+          const lk = (k || '').toLowerCase();
+          // 兜底：若平台未能确定或缺失字段，继续广谱匹配
+          if (!result.base_url && lk.includes('base') && (val.startsWith('http://') || val.startsWith('https://'))) {
+            result.base_url = val;
+          }
+          if (!result.api_key && (lk.includes('key') || lk.includes('token'))) {
+            result.api_key = val;
+          }
+          if (!result.model_id && (lk.includes('model'))) {
+            result.model_id = val;
+          }
+        }
+        if (result.base_url && result.api_key && result.model_id) break;
+      }
+      return result;
+    }
+    // 读取
+    baseEl.value = localStorage.getItem('llm_base_url') || '';
+    keyEl.value = localStorage.getItem('llm_api_key') || '';
+    modelEl.value = localStorage.getItem('llm_model_id') || '';
+    // 保存
+    baseEl.addEventListener('blur', () => localStorage.setItem('llm_base_url', baseEl.value.trim()));
+    keyEl.addEventListener('blur', () => localStorage.setItem('llm_api_key', keyEl.value.trim()));
+    modelEl.addEventListener('blur', () => localStorage.setItem('llm_model_id', modelEl.value.trim()));
+
+    // ------------------------------
+    // 使用主页配置开关逻辑
+    // 尝试从若干已知键读取（提高兼容性）
+    // ------------------------------
+    const knownBaseKeys = ['llm_base_url', 'base_url', 'ai_base_url', 'openai_base_url', 'dt_base_url'];
+    const knownApiKeys  = ['llm_api_key', 'api_key', 'ai_api_key', 'openai_api_key', 'dt_api_key', 'token'];
+    const knownModelIds = ['llm_model_id', 'model_id', 'ai_model_id', 'openai_model_id', 'dt_model_id'];
+
+    function tryRead(keys) {
+      for (const k of keys) {
+        const v = localStorage.getItem(k);
+        if (v && v.trim()) return v.trim();
+      }
+      return '';
+    }
+
+    function applyHomeCfg() {
+      // 优先按“当前平台”读取，确保与首页一致
+      const plat = getSelectedPlatform();
+      let b = '';
+      let k = '';
+      let m = '';
+      if (plat && plat.trim()) {
+        const np = normalizePlatform(plat);
+        const customBase = localStorage.getItem('translator_platform_custom_base_url') || '';
+        b = np === 'custom' ? (customBase.trim() || '') : resolveBaseUrlByPlatform(np);
+        k = localStorage.getItem(`translator_platform_${plat}_apikey`) || localStorage.getItem(`translator_platform_${np}_apikey`) || '';
+        m = localStorage.getItem(`translator_platform_${plat}_model_id`) || localStorage.getItem(`translator_platform_${np}_model_id`) || '';
+        b = (b || '').trim(); k = (k || '').trim(); m = (m || '').trim();
+      }
+      // 若缺失，回落到已知键与广谱扫描
+      if (!b || !k || !m) {
+        b = b || tryRead(knownBaseKeys);
+        k = k || tryRead(knownApiKeys);
+        m = m || tryRead(knownModelIds);
+      }
+      // 若缺失，扫描JSON对象
+      if (!b || !k || !m) {
+        const fromJson = readLLMFromLocalStorage();
+        b = b || fromJson.base_url;
+        k = k || fromJson.api_key;
+        m = m || fromJson.model_id;
+      }
+      baseEl.value = b || '';
+      keyEl.value  = k || '';
+      modelEl.value= m || '';
+    }
+
+    const homeSwitch = document.getElementById('use_home_cfg');
+    homeSwitch.addEventListener('change', () => {
+      const on = homeSwitch.checked;
+      if (on) {
+        applyHomeCfg();
+      }
+      baseEl.disabled = on;
+      keyEl.disabled = on;
+      modelEl.disabled = on;
+    });
+
+    // 初始状态应用：若默认勾选使用主页配置，则同步并禁用输入框
+    if (homeSwitch.checked) {
+      applyHomeCfg();
+      baseEl.disabled = true;
+      keyEl.disabled = true;
+      modelEl.disabled = true;
+    }
+
+    // 实时同步：监听 storage 事件与可见性变化
+    // 当主页更新 localStorage 时，在线文本页自动应用最新配置
+    window.addEventListener('storage', (e) => {
+      if (!homeSwitch.checked) return;
+      const k = (e.key || '').toLowerCase();
+      if (!k) return;
+      const watchHints = ['translator_platform_', 'llm_', 'base_url', 'api_key', 'model_id', 'dt_', 'custom_base_url'];
+      if (watchHints.some(h => k.includes(h))) {
+        applyHomeCfg();
+      }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (!homeSwitch.checked) return;
+      if (document.visibilityState === 'visible') applyHomeCfg();
+    });
+  }
+
+  initLangSelect();
+  initLLMInputs();
+
+  async function translateTextOnce() {
+    const text = document.getElementById('ot_input').value.trim();
+    const toLang = document.getElementById('ot_to_lang').value || '简体中文';
+    const output = document.getElementById('ot_output');
+    const btn = document.getElementById('ot_btn');
+    if (!text) { output.textContent = '请输入内容'; return; }
+    output.textContent = '翻译中...';
+    btn.disabled = true;
+    /* ============================================
+       请求前校验与回落（中文注释 / ASC2 风格）
+       - 优先使用输入框的值
+       - 若开启“使用主页配置”，或输入为空，则尝试已知 localStorage 键的回落
+       - 若仍缺失，直接提示清晰错误，不发起请求
+       ============================================ */
+    const baseEl = document.getElementById('llm_base_url');
+    const keyEl = document.getElementById('llm_api_key');
+    const modelEl = document.getElementById('llm_model_id');
+    const homeSwitch = document.getElementById('use_home_cfg');
+
+    const knownBaseKeys = ['llm_base_url', 'base_url', 'ai_base_url', 'openai_base_url', 'dt_base_url'];
+    const knownApiKeys  = ['llm_api_key', 'api_key', 'ai_api_key', 'openai_api_key', 'dt_api_key', 'token'];
+    const knownModelIds = ['llm_model_id', 'model_id', 'ai_model_id', 'openai_model_id', 'dt_model_id'];
+
+    const tryRead = (keys) => {
+      for (const k of keys) {
+        const v = localStorage.getItem(k);
+        if (v && v.trim()) return v.trim();
+      }
+      return '';
+    };
+    function readLLMFromLocalStorage() {
+      /* ============================================
+         广谱读取 LLM 配置（中文注释 / ASC2 风格）
+         - 支持 snake_case 与 camelCase
+         - 支持嵌套对象结构：llm/ai/config/openai
+         - 支持 model 字段为字符串或对象（id/name）
+         ============================================ */
+      const result = { base_url: '', api_key: '', model_id: '' };
+      const tryAssign = (obj) => {
+        if (!obj || typeof obj !== 'object') return;
+        const a = obj;
+        // base_url / baseUrl
+        if (!result.base_url && typeof a.base_url === 'string') result.base_url = a.base_url.trim();
+        if (!result.base_url && typeof a.baseUrl === 'string') result.base_url = a.baseUrl.trim();
+        // api_key / apiKey / token
+        if (!result.api_key && typeof a.api_key === 'string') result.api_key = a.api_key.trim();
+        if (!result.api_key && typeof a.apiKey === 'string') result.api_key = a.apiKey.trim();
+        if (!result.api_key && typeof a.token === 'string') result.api_key = a.token.trim();
+        // model_id / modelId / model
+        if (!result.model_id && typeof a.model_id === 'string') result.model_id = a.model_id.trim();
+        if (!result.model_id && typeof a.modelId === 'string') result.model_id = a.modelId.trim();
+        if (!result.model_id && typeof a.model === 'string') result.model_id = a.model.trim();
+        if (!result.model_id && a.model && typeof a.model === 'object') {
+          const mid = (typeof a.model.id === 'string' && a.model.id.trim()) ||
+                      (typeof a.model.name === 'string' && a.model.name.trim());
+          if (mid) result.model_id = mid;
+        }
+        // 递归常见命名空间
+        if (a.llm) tryAssign(a.llm);
+        if (a.ai) tryAssign(a.ai);
+        if (a.config) tryAssign(a.config);
+        if (a.openai) tryAssign(a.openai);
+      };
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        const v = localStorage.getItem(k);
+        if (!v) continue;
+        try {
+          const parsed = JSON.parse(v);
+          tryAssign(parsed);
+        } catch {
+          const val = v.trim();
+          if (!val) continue;
+          const lk = k.toLowerCase();
+          // 从首页保存的 translator_platform_* 键直接解析 base_url
+          // 形如：translator_platform_https://api.openai.com/v1_apikey 或 _model_id
+          if (!result.base_url && k.startsWith('translator_platform_')) {
+            const prefixLen = 'translator_platform_'.length;
+            const apiSuffix = '_apikey';
+            const midSuffix = '_model_id';
+            let candidate = '';
+            if (k.endsWith(apiSuffix)) {
+              candidate = k.substring(prefixLen, k.length - apiSuffix.length);
+            } else if (k.endsWith(midSuffix)) {
+              candidate = k.substring(prefixLen, k.length - midSuffix.length);
+            }
+            if (candidate && (candidate.startsWith('http://') || candidate.startsWith('https://'))) {
+              result.base_url = candidate;
+            }
+          }
+          if (!result.base_url && lk.includes('base') && (val.startsWith('http://') || val.startsWith('https://'))) {
+            result.base_url = val;
+          }
+          if (!result.api_key && (lk.includes('key') || lk.includes('token'))) {
+            result.api_key = val;
+          }
+          if (!result.model_id && (lk.includes('model'))) {
+            result.model_id = val;
+          }
+        }
+        if (result.base_url && result.api_key && result.model_id) break;
+      }
+      return result;
+    }
+
+    const translator = {
+      base_url: baseEl.value.trim(),
+      api_key: keyEl.value.trim(),
+      model_id: modelEl.value.trim(),
+    };
+
+    const needFallback = homeSwitch?.checked || (!translator.base_url || !translator.api_key || !translator.model_id);
+    if (needFallback) {
+      translator.base_url = translator.base_url || tryRead(knownBaseKeys);
+      translator.api_key  = translator.api_key  || tryRead(knownApiKeys);
+      translator.model_id = translator.model_id || tryRead(knownModelIds);
+      // 仍缺失则扫描JSON对象
+      if (!translator.base_url || !translator.api_key || !translator.model_id) {
+        const fromJson = readLLMFromLocalStorage();
+        translator.base_url = translator.base_url || fromJson.base_url;
+        translator.api_key  = translator.api_key  || fromJson.api_key;
+        translator.model_id = translator.model_id || fromJson.model_id;
+      }
+    }
+
+    if (!translator.base_url || !translator.api_key || !translator.model_id) {
+      output.textContent = '**缺少LLM配置**：请在首页或此页填写 base_url / api_key / model_id';
+      btn.disabled = false;
+      return;
+    }
+    try {
+      const resp = await fetch('/service/translate_text', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ text, to_lang: toLang, translator })
+      });
+      if (!resp.ok) {
+        let msg = `请求失败 (HTTP ${resp.status})`;
+        try {
+          const errJson = await resp.json();
+          if (errJson?.detail) msg = `请求失败：${errJson.detail}`;
+        } catch {
+          try {
+            const errText = await resp.text();
+            if (errText) msg = `请求失败：${errText}`;
+          } catch {}
+        }
+        output.textContent = msg;
+        return;
+      }
+      const data = await resp.json();
+      output.textContent = data.translated || '无内容';
+    } catch (err) {
+      output.textContent = '错误：' + (err?.message || String(err));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  document.getElementById('ot_btn').addEventListener('click', translateTextOnce);
+</script>
+</body>
+</html>
