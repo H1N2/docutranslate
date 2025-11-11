@@ -39,8 +39,8 @@ Input:
 
 ```json
 {{
-3:source,
-4:source,
+"3":source,
+"4":source,
 }}
 ```
 
@@ -48,40 +48,61 @@ Output(target language: {to_lang}):
 
 ```json
 {{
-3:translation,
-4:translation,
+"3":translation,
+"4":translation,
 }}
 ```
+For statements that must be combined during translation, employ merging at the minimal structural level. The total number of keys must remain unchanged after merging, and any empty values should be retained.
+Below is an example of how merging should be done when necessary:
 
+input:
+```json
+{{
+"3":"汤姆说:“杰克你",
+"4":"好”。"
+}}
+```
+output:
+```json
+{{
+"3":"Tom says:\"Hello Jack.\"",
+"4":""
+}}
+```
 </example>
 Please return the translated JSON directly without including any additional information and preserve special tags or untranslatable elements (such as code, brand names, technical terms) as they are.
 """
 
-def get_original_segments(prompt:str):
+
+def get_original_segments(prompt: str):
     match = re.search(r'<input>\n```json\n(.*)\n```\n</input>', prompt, re.DOTALL)
     if match:
         return match.group(1)
     else:
         raise ValueError("无法从prompt中提取初始文本")
 
-def get_target_segments(result:str):
+
+def get_target_segments(result: str):
     match = re.search(r'```json(.*)```', result, re.DOTALL)
     if match:
         return match.group(1)
     else:
         return result
 
-@dataclass
+
+@dataclass(kw_only=True)
 class SegmentsTranslateAgentConfig(AgentConfig):
     to_lang: str
     custom_prompt: str | None = None
     glossary_dict: dict[str, str] | None = None
+    force_json:bool = False
 
 
 class SegmentsTranslateAgent(Agent):
     def __init__(self, config: SegmentsTranslateAgentConfig):
         super().__init__(config)
         self.to_lang = config.to_lang
+        self.force_json = config.force_json
         self.system_prompt = f"""
 # Role
 - You are a professional, authentic machine translation engine.
@@ -104,7 +125,7 @@ class SegmentsTranslateAgent(Agent):
         - 如果键不匹配，构造一个部分成功的结果，并通过 PartialTranslationError 异常抛出，以触发重试。
         - 其他错误（如JSON解析失败、模型偷懒）则抛出普通 ValueError 触发重试。
         """
-        original_segments=get_original_segments(origin_prompt)
+        original_segments = get_original_segments(origin_prompt)
         result = get_target_segments(result)
         if result == "":
             if original_segments.strip() != "":
@@ -142,8 +163,9 @@ class SegmentsTranslateAgent(Agent):
                 for key in missing_keys:
                     final_chunk[key] = str(original_chunk[key])
 
+
                 # 抛出自定义异常，将部分结果和错误信息一起传递出去
-                raise PartialAgentResultError("键不匹配，触发重试", partial_result=final_chunk)
+                raise PartialAgentResultError("键不匹配，触发重试", partial_result=final_chunk,append_prompt=f"\nBe careful not to omit any keys from the input; do not combine sentences when translating.\n")
 
             # 如果键完全匹配（理想情况），正常返回
             for key, value in repaired_result.items():
@@ -160,7 +182,7 @@ class SegmentsTranslateAgent(Agent):
         处理在所有重试后仍然失败的请求。
         作为备用方案，返回原文内容，并将所有值转换为字符串。
         """
-        original_segments=get_original_segments(origin_prompt)
+        original_segments = get_original_segments(origin_prompt)
         if original_segments == "":
             return {}
         try:
@@ -177,8 +199,8 @@ class SegmentsTranslateAgent(Agent):
     def send_segments(self, segments: list[str], chunk_size: int) -> list[str]:
         indexed_originals, chunks, merged_indices_list = segments2json_chunks(segments, chunk_size)
         prompts = [generate_prompt(json.dumps(chunk, ensure_ascii=False, indent=0), self.to_lang) for chunk in chunks]
-
-        translated_chunks = super().send_prompts(prompts=prompts, pre_send_handler=self._pre_send_handler,
+        translated_chunks = super().send_prompts(prompts=prompts, json_format=self.force_json,
+                                                 pre_send_handler=self._pre_send_handler,
                                                  result_handler=self._result_handler,
                                                  error_result_handler=self._error_result_handler)
 
@@ -216,10 +238,10 @@ class SegmentsTranslateAgent(Agent):
                                                                                  chunk_size)
         prompts = [generate_prompt(json.dumps(chunk, ensure_ascii=False, indent=0), self.to_lang) for chunk in chunks]
 
-        translated_chunks = await super().send_prompts_async(prompts=prompts, pre_send_handler=self._pre_send_handler,
+        translated_chunks = await super().send_prompts_async(prompts=prompts, force_json=self.force_json,
+                                                             pre_send_handler=self._pre_send_handler,
                                                              result_handler=self._result_handler,
                                                              error_result_handler=self._error_result_handler)
-
         indexed_translated = indexed_originals.copy()
         for chunk in translated_chunks:
             try:

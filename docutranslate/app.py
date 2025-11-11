@@ -311,6 +311,9 @@ class GlossaryAgentConfigPayload(BaseModel):
     custom_prompt: Optional[str] = Field(
         default=None, description="生成术语表的用户自定义提示词"
     )
+    force_json: bool = Field(
+        default=False, description="强制Agent输出JSON格式的术语表。"
+    )
 
 
 # 1. 定义所有工作流共享的基础参数
@@ -375,6 +378,9 @@ class BaseWorkflowParams(BaseModel):
     glossary_agent_config: Optional[GlossaryAgentConfigPayload] = Field(
         None,
         description="用于术语表生成的Agent的配置。如果 `glossary_generate_enable` 为 `True`，此项必填。",
+    )
+    force_json: bool = Field(
+        default=False, description="应输出json格式时强制ai输出json"
     )
 
     @model_validator(mode="before")
@@ -468,6 +474,10 @@ class TextWorkflowParams(BaseWorkflowParams):
     separator: str = Field(
         "\n",
         description="当 insert_mode 为 'append' 或 'prepend' 时，用于分隔原文和译文的分隔符。",
+    )
+    segment_mode: Literal["line", "paragraph", "none"] = Field(
+        "line",
+        description="分段模式。'line'：按行分段（每行独立翻译），'paragraph'：按段落分段（连续非空行合并为段落），'none'：不分段（全文视为一个段落）。",
     )
 
 
@@ -729,6 +739,7 @@ class TranslateServiceRequest(BaseModel):
                             "timeout": default_params["timeout"],
                             "thinking": "default",
                             "retry": default_params["retry"],
+                            "force_json": False,
                         },
                     },
                 },
@@ -903,6 +914,7 @@ async def _perform_translation(
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )
@@ -961,9 +973,11 @@ async def _perform_translation(
                     "glossary_dict",
                     "insert_mode",
                     "separator",
+                    "segment_mode",
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )
@@ -1000,6 +1014,7 @@ async def _perform_translation(
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )
@@ -1038,6 +1053,7 @@ async def _perform_translation(
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )
@@ -1075,6 +1091,7 @@ async def _perform_translation(
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )
@@ -1112,6 +1129,7 @@ async def _perform_translation(
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )
@@ -1149,6 +1167,7 @@ async def _perform_translation(
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )
@@ -1187,6 +1206,7 @@ async def _perform_translation(
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )
@@ -1223,6 +1243,7 @@ async def _perform_translation(
                     "timeout",
                     "retry",
                     "system_proxy_enable",
+                    "force_json",
                 },
                 exclude_none=True,
             )

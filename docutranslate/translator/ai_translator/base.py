@@ -27,7 +27,6 @@ class AiTranslatorConfig(TranslatorConfig, AgentConfig):
     glossary_agent_config: GlossaryAgentConfig | None = None
     skip_translate: bool = False  # 当skip_translate为False时base_url、model_id为必填项
 
-
 T = TypeVar("T", bound=Document)
 
 
@@ -64,6 +63,7 @@ class AiTranslator(Translator[T]):
                     logger=self.logger,
                     retry=config.retry,
                     system_proxy_enable=config.system_proxy_enable,
+                    force_json=config.force_json,
                 )
                 self.glossary_agent = GlossaryAgent(glossary_agent_config)
 
